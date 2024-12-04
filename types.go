@@ -8,19 +8,25 @@ import (
 )
 
 const (
-	Description      = `^[\\w\\s&-]+$`
-	ShortDescription = `^[\\w\\s\\-]+$`
-	Price            = `^\\d+\\.\\d{2}$`
+	Description      = `^[\w\s&-]+$`
+	ShortDescription = `^[\w\s\-]+$`
+	Price            = `^\d+\.\d{2}$`
 
 	DateFormat = "2006-01-02"
 	TimeFormat = "15:04"
 )
 
-type Receipt struct {
-	Retailer     string `json:"description" validate:"required,descriptionValidation"`
-	PurchaseDate string `json:"purchaseDate" validate:"required"`
-	PurchaseTime string `json:"purchaseTime" validate:"required"`
-	Items        []*Item `json:"items" validate:"required, gt=0,dive"`
+type ProcessedReceipt struct {
+	ID      string `json:"id" validate:"required,uuid"`
+	Receipt ReceiptPayload
+	Points  int64 `json:"points" validate:"required"`
+}
+
+type ReceiptPayload struct {
+	Retailer     string `json:"retailer" validate:"required,retailerValidation"`
+	PurchaseDate string `json:"purchaseDate" validate:"required,dateValidation"`
+	PurchaseTime string `json:"purchaseTime" validate:"required,timeValidation"`
+	Items        []Item `json:"items" validate:"required,min=1,dive"`
 	Total        string `json:"total" validate:"required,priceValidation"`
 }
 
@@ -35,7 +41,7 @@ func shortDescriptionValidation(fl validator.FieldLevel) bool {
 	return regEx.MatchString(value)
 }
 
-func descriptionValidation(fl validator.FieldLevel) bool {
+func retailerValidation(fl validator.FieldLevel) bool {
 	value := fl.Field().String()
 	regEx := regexp.MustCompile(Description)
 	return regEx.MatchString(value)
