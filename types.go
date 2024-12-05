@@ -16,6 +16,14 @@ const (
 	TimeFormat = "15:04"
 )
 
+type IdResponse struct {
+	ID string `json:"id"`
+}
+
+type PointsResponse struct {
+	Points int64 `json:"points"`
+}
+
 type ProcessedReceipt struct {
 	ID      string `json:"id" validate:"required,uuid"`
 	Receipt ReceiptPayload
