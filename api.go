@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"math"
 	"net/http"
@@ -54,12 +55,12 @@ func (s *ApiServer) Run() {
 func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request) error {
 	var receipt *ReceiptPayload
 	if err := json.NewDecoder(r.Body).Decode(&receipt); err != nil {
-		return err
+		return fmt.Errorf("handleProcessReceipts: invalid JSON format")
 	}
 
 	if err := validate.Struct(receipt); err != nil {
 
-		return err
+		return fmt.Errorf("handleProcessReceipts: the receipt is not valid, error with: %v", err)
 	}
 
 	var processedReceipt *ProcessedReceipt
@@ -78,14 +79,32 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 
 	receiptStore[newReceiptId] = processedReceipt
 
-	return WriteJson(w, http.StatusOK, processedReceipt.Points)
+	response := IdResponse{
+		ID: processedReceipt.ID,
+	}
+
+	return WriteJson(w, http.StatusOK, response)
 }
 
 // handleGetPointsById takes a receipt id value and returns the determined points for that receipt.
 func (s *ApiServer) handleGetPointsById(w http.ResponseWriter, r *http.Request) error {
-	return nil
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	receipt, ok := receiptStore[id]
+
+	if !ok {
+		return fmt.Errorf("handleGetPointsById: no receipt found with the ID: %s", id)
+	}
+
+	response := PointsResponse{
+		Points: receipt.Points,
+	}
+
+	return WriteJson(w, http.StatusOK, response)
 }
 
+// WriteJson sends JSON response to client with status code.
 func WriteJson(w http.ResponseWriter, statusCode int, value any) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
@@ -95,24 +114,52 @@ func WriteJson(w http.ResponseWriter, statusCode int, value any) error {
 type ApiHandlerFunc func(http.ResponseWriter, *http.Request) error
 
 type ApiError struct {
-	Error   string `json:"error"`
-	Message string `json:"msg"`
+	Error string `json:"error"`
 }
 
+// errorHandleToHandleFunc is a wrapper to handle the error returned by the route logics and make sure it is a HandlerFunc that is required by the mux router and will send the error that happen in the route.
 func errorHandleToHandleFunc(fn ApiHandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := fn(w, r); err != nil {
-			WriteJson(w, http.StatusBadRequest, ApiError{Error: "The receipt is invalid", Message: err.Error()})
+			if strings.Contains(err.Error(), "handleProcessReceipts") {
+				WriteJson(w, http.StatusBadRequest, ApiError{Error: err.Error()})
+				return
+			}
+
+			if strings.Contains(err.Error(), "handleGetPointsById") {
+				WriteJson(w, http.StatusNotFound, ApiError{Error: err.Error()})
+				return
+			}
+
+			if strings.Contains(err.Error(), "processReceiptPoints") {
+				WriteJson(w, http.StatusBadRequest, ApiError{Error: err.Error()})
+				return
+			}
+
+			WriteJson(w, http.StatusInternalServerError, ApiError{Error: err.Error()})
+
 		}
 	}
 }
 
+// processReceiptPoints takes a receipt and processes it to return the point value based on the establish value logic.
 func processReceiptPoints(receipt *ReceiptPayload) (int64, error) {
+	/*
+		current point logic:
+		- 1 point for every alphanumeric character in the retailer name.
+		- 50 points if the total is a round dollar amount with no cents.
+		- 25 points if the total is a multiple of 0.25.
+		- 5 points for every two items on the receipt.
+		- If the trimmed length of the item description is a multiple of 3,
+		-  multiply the price by 0.2 and round up to the nearest integer. The result is the number of points earned.
+		- 6 points if the day in the purchase date is odd.
+		- 10 points if the time of purchase is after 2:00pm and before 4:00pm.
+	*/
 	pointValue := 0
 
 	totalAsFloat, err := strconv.ParseFloat(receipt.Total, 64)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("processReceiptPoints: error in parsing total as float")
 	}
 
 	for _, char := range receipt.Retailer {
@@ -144,24 +191,19 @@ func processReceiptPoints(receipt *ReceiptPayload) (int64, error) {
 		}
 	}
 
-	purchaseDateParse, err := time.Parse(DateFormat, receipt.PurchaseDate)
+	purchaseDateTimeParse, err := time.Parse(fmt.Sprintf("%s %s", DateFormat, TimeFormat), fmt.Sprintf("%s %s", receipt.PurchaseDate, receipt.PurchaseTime))
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("processReceiptPoints: error in parsing purchase datetime")
 	}
 
-	if purchaseDateParse.Day() % 2 == 1 {
+	if purchaseDateTimeParse.Day()%2 == 1 {
 		pointValue += 6
 	}
 
-	purchaseTimeParse, err := time.Parse(TimeFormat, receipt.PurchaseTime)
-	if err != nil {
-		return 0, err
-	}
+	after2pm := time.Date(purchaseDateTimeParse.Year(), purchaseDateTimeParse.Month(), purchaseDateTimeParse.Day(), 14, 0, 0, 0, time.UTC)
+	before4pm := time.Date(purchaseDateTimeParse.Year(), purchaseDateTimeParse.Month(), purchaseDateTimeParse.Day(), 16, 0, 0, 0, time.UTC)
 
-	after2pm := time.Date(0,0,0, 14, 0,0,0, time.UTC)
-	before4pm := time.Date(0,0,0, 16, 0,0,0, time.UTC)
-
-	if purchaseTimeParse.After(after2pm) && purchaseTimeParse.Before(before4pm) {
+	if purchaseDateTimeParse.After(after2pm) && purchaseDateTimeParse.Before(before4pm) {
 		pointValue += 10
 	}
 
