@@ -3,7 +3,12 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"math"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
@@ -11,6 +16,7 @@ import (
 )
 
 var validate *validator.Validate
+var receiptStore = make(map[string]*ProcessedReceipt)
 
 func init() {
 	validate = validator.New()
@@ -58,13 +64,21 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 
 	var processedReceipt *ProcessedReceipt
 	newReceiptId := uuid.New().String()
+
+	points, err := processReceiptPoints(receipt)
+	if err != nil {
+		return err
+	}
+
 	processedReceipt = &ProcessedReceipt{
 		ID:      newReceiptId,
 		Receipt: *receipt,
-		Points: 0,
+		Points:  points,
 	}
 
-	return WriteJson(w, http.StatusOK, processedReceipt.ID)
+	receiptStore[newReceiptId] = processedReceipt
+
+	return WriteJson(w, http.StatusOK, processedReceipt.Points)
 }
 
 // handleGetPointsById takes a receipt id value and returns the determined points for that receipt.
@@ -91,4 +105,65 @@ func errorHandleToHandleFunc(fn ApiHandlerFunc) http.HandlerFunc {
 			WriteJson(w, http.StatusBadRequest, ApiError{Error: "The receipt is invalid", Message: err.Error()})
 		}
 	}
+}
+
+func processReceiptPoints(receipt *ReceiptPayload) (int64, error) {
+	pointValue := 0
+
+	totalAsFloat, err := strconv.ParseFloat(receipt.Total, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, char := range receipt.Retailer {
+		if unicode.IsLetter(char) || unicode.IsNumber(char) {
+			pointValue += 1
+		}
+	}
+
+	if math.Mod(totalAsFloat, 1) == 0 {
+		pointValue += 50
+	}
+
+	if math.Mod(totalAsFloat, 0.25) == 0 {
+		pointValue += 25
+	}
+
+	if len(receipt.Items) >= 2 {
+		pointValue += (len(receipt.Items) / 2) * 5
+	}
+
+	for _, item := range receipt.Items {
+		if len(strings.TrimSpace(item.ShortDescription))%3 == 0 {
+			priceAsFloat, err := strconv.ParseFloat(item.Price, 64)
+			if err != nil {
+				return 0, err
+			}
+
+			pointValue += int(math.Ceil(priceAsFloat * 0.2))
+		}
+	}
+
+	purchaseDateParse, err := time.Parse(DateFormat, receipt.PurchaseDate)
+	if err != nil {
+		return 0, err
+	}
+
+	if purchaseDateParse.Day() % 2 == 1 {
+		pointValue += 6
+	}
+
+	purchaseTimeParse, err := time.Parse(TimeFormat, receipt.PurchaseTime)
+	if err != nil {
+		return 0, err
+	}
+
+	after2pm := time.Date(0,0,0, 14, 0,0,0, time.UTC)
+	before4pm := time.Date(0,0,0, 16, 0,0,0, time.UTC)
+
+	if purchaseTimeParse.After(after2pm) && purchaseTimeParse.Before(before4pm) {
+		pointValue += 10
+	}
+
+	return int64(pointValue), nil
 }
