@@ -16,6 +16,15 @@ const (
 	TimeFormat = "15:04"
 )
 
+type User struct {
+	ID string `json:"id"`
+	Receipts []string `json:"receipts"`
+}
+
+type Merchant struct {
+	Name string `json:"name"`
+}
+
 type IdResponse struct {
 	ID string `json:"id"`
 }
@@ -28,6 +37,9 @@ type ProcessedReceipt struct {
 	ID      string `json:"id" validate:"required,uuid"`
 	Receipt ReceiptPayload
 	Points  int64 `json:"points" validate:"required"`
+	SubmissionDate time.Time
+	MerchantID string
+	UserID string
 }
 
 type ReceiptPayload struct {

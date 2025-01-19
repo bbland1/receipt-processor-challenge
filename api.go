@@ -19,6 +19,8 @@ import (
 
 var validate *validator.Validate
 var receiptStore = make(map[string]*ProcessedReceipt)
+var userStore = make(map[string][]string)
+
 var (
 	errInvalidJSON       = errors.New("invalid JSON format")
 	errReceiptValidation = errors.New("validation issue")
@@ -62,6 +64,7 @@ func (s *ApiServer) Run() {
 // handleProcessReceipts takes a JSON payload of a receipt to determine the points values of the receipt add to the info and return an id for the successfully processed receipt.
 func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request) error {
 	var receipt *ReceiptPayload
+	token := r.Header.Get("X-Authorization")
 	if err := json.NewDecoder(r.Body).Decode(&receipt); err != nil {
 		return errInvalidJSON
 	}
@@ -74,16 +77,23 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 	var processedReceipt *ProcessedReceipt
 	newReceiptId := uuid.New().String()
 
-	points, err := processReceiptPoints(receipt)
+	processedReceipt = &ProcessedReceipt{
+		ID:      newReceiptId,
+		Receipt: *receipt,
+		Points:  0,
+		UserID: token,
+		MerchantID: receipt.Retailer,
+		SubmissionDate: time.Now(),
+	}
+
+	points, err := processReceiptPoints(&processedReceipt.Receipt, token)
 	if err != nil {
 		return err
 	}
 
-	processedReceipt = &ProcessedReceipt{
-		ID:      newReceiptId,
-		Receipt: *receipt,
-		Points:  points,
-	}
+	processedReceipt.Points = points
+
+	userStore[token] = append(userStore[token], newReceiptId)
 
 	receiptStore[newReceiptId] = processedReceipt
 
@@ -151,7 +161,7 @@ func errorHandleToHandleFunc(fn ApiHandlerFunc) http.HandlerFunc {
 }
 
 // processReceiptPoints takes a receipt and processes it to return the point value based on the establish value logic.
-func processReceiptPoints(receipt *ReceiptPayload) (int64, error) {
+func processReceiptPoints(receipt *ReceiptPayload, userID string) (int64, error) {
 	/*
 		current point logic:
 		- 1 point for every alphanumeric character in the retailer name.
@@ -162,6 +172,7 @@ func processReceiptPoints(receipt *ReceiptPayload) (int64, error) {
 		-  multiply the price by 0.2 and round up to the nearest integer. The result is the number of points earned.
 		- 6 points if the day in the purchase date is odd.
 		- 10 points if the time of purchase is after 2:00pm and before 4:00pm.
+		- we are running a promotions for the first 3 receipts scanned for the user they will get 300 points for each receipt
 	*/
 	pointValue := 0
 
@@ -213,6 +224,11 @@ func processReceiptPoints(receipt *ReceiptPayload) (int64, error) {
 
 	if purchaseDateTimeParse.After(after2pm) && purchaseDateTimeParse.Before(before4pm) {
 		pointValue += 10
+	}
+
+	// when a user has 
+	if len(userStore[userID]) < 3 {
+		pointValue += 300
 	}
 
 	return int64(pointValue), nil
