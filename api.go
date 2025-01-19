@@ -64,6 +64,7 @@ func (s *ApiServer) Run() {
 // handleProcessReceipts takes a JSON payload of a receipt to determine the points values of the receipt add to the info and return an id for the successfully processed receipt.
 func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request) error {
 	var receipt *ReceiptPayload
+	// TODO: this is a quick way to get various users set would need to update for prod
 	token := r.Header.Get("X-Authorization")
 	if err := json.NewDecoder(r.Body).Decode(&receipt); err != nil {
 		return errInvalidJSON
@@ -226,7 +227,6 @@ func processReceiptPoints(receipt *ReceiptPayload, userID string) (int64, error)
 		pointValue += 10
 	}
 
-	// when a user has 
 	if len(userStore[userID]) < 3 {
 		pointValue += 300
 	}
