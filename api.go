@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -18,6 +19,13 @@ import (
 
 var validate *validator.Validate
 var receiptStore = make(map[string]*ProcessedReceipt)
+var (
+	errInvalidJSON       = errors.New("invalid JSON format")
+	errReceiptValidation = errors.New("validation issue")
+	errGetReceiptById    = errors.New("no receipt found with the ID")
+	errDateTimePointParse = errors.New("error in parsing purchase datetime")
+	errTotalAsFloat = errors.New("total couldn't be parse as a float")
+)
 
 func init() {
 	validate = validator.New()
@@ -55,12 +63,12 @@ func (s *ApiServer) Run() {
 func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request) error {
 	var receipt *ReceiptPayload
 	if err := json.NewDecoder(r.Body).Decode(&receipt); err != nil {
-		return fmt.Errorf("handleProcessReceipts: invalid JSON format")
+		return errInvalidJSON
 	}
 
 	if err := validate.Struct(receipt); err != nil {
 
-		return fmt.Errorf("handleProcessReceipts: the receipt is not valid, error with: %v", err)
+		return fmt.Errorf("%w: %v", errReceiptValidation, strings.Split(err.Error(), ":")[2])
 	}
 
 	var processedReceipt *ProcessedReceipt
@@ -94,7 +102,7 @@ func (s *ApiServer) handleGetPointsById(w http.ResponseWriter, r *http.Request) 
 	receipt, ok := receiptStore[id]
 
 	if !ok {
-		return fmt.Errorf("handleGetPointsById: no receipt found with the ID: %s", id)
+		return fmt.Errorf("%w: %s", errGetReceiptById, id)
 	}
 
 	response := PointsResponse{
@@ -121,17 +129,17 @@ type ApiError struct {
 func errorHandleToHandleFunc(fn ApiHandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := fn(w, r); err != nil {
-			if strings.Contains(err.Error(), "handleProcessReceipts") {
+			if errors.Is(err, errInvalidJSON) || errors.Is(err, errReceiptValidation) {
 				WriteJson(w, http.StatusBadRequest, ApiError{Error: err.Error()})
 				return
 			}
 
-			if strings.Contains(err.Error(), "handleGetPointsById") {
+			if errors.Is(err, errGetReceiptById) {
 				WriteJson(w, http.StatusNotFound, ApiError{Error: err.Error()})
 				return
 			}
 
-			if strings.Contains(err.Error(), "processReceiptPoints") {
+			if errors.Is(err, errDateTimePointParse) || errors.Is(err, errTotalAsFloat){
 				WriteJson(w, http.StatusBadRequest, ApiError{Error: err.Error()})
 				return
 			}
@@ -159,7 +167,7 @@ func processReceiptPoints(receipt *ReceiptPayload) (int64, error) {
 
 	totalAsFloat, err := strconv.ParseFloat(receipt.Total, 64)
 	if err != nil {
-		return 0, fmt.Errorf("processReceiptPoints: error in parsing total as float")
+		return 0, errTotalAsFloat
 	}
 
 	for _, char := range receipt.Retailer {
@@ -193,7 +201,7 @@ func processReceiptPoints(receipt *ReceiptPayload) (int64, error) {
 
 	purchaseDateTimeParse, err := time.Parse(fmt.Sprintf("%s %s", DateFormat, TimeFormat), fmt.Sprintf("%s %s", receipt.PurchaseDate, receipt.PurchaseTime))
 	if err != nil {
-		return 0, fmt.Errorf("processReceiptPoints: error in parsing purchase datetime")
+		return 0, errDateTimePointParse
 	}
 
 	if purchaseDateTimeParse.Day()%2 == 1 {
