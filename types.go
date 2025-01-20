@@ -29,6 +29,11 @@ type IdResponse struct {
 	ID string `json:"id"`
 }
 
+type ProcessedResponse struct {
+	ID IdResponse
+	Receipt ProcessedReceipt
+}
+
 type PointsResponse struct {
 	Points int64 `json:"points"`
 }

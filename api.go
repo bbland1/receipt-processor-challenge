@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -18,15 +19,18 @@ import (
 )
 
 var validate *validator.Validate
-var receiptStore = make(map[string]*ProcessedReceipt)
-var userStore = make(map[string][]string)
+var receiptStore = sync.Map{}
+var userStore = sync.Map{}
 
 var (
-	errInvalidJSON       = errors.New("invalid JSON format")
-	errReceiptValidation = errors.New("validation issue")
-	errGetReceiptById    = errors.New("no receipt found with the ID")
+	errInvalidJSON        = errors.New("invalid JSON format")
+	errReceiptValidation  = errors.New("validation issue")
+	errGetReceiptById     = errors.New("no receipt found with the ID")
 	errDateTimePointParse = errors.New("error in parsing purchase datetime")
-	errTotalAsFloat = errors.New("total couldn't be parse as a float")
+	errTotalAsFloat       = errors.New("total couldn't be parse as a float")
+	errUserNotFound       = errors.New("user not found to add points")
+	errLoadOrStoreUser    = errors.New("error loading or storing user first time")
+	errDuplicateReceipt   = errors.New("this receipt has been uploaded before")
 )
 
 func init() {
@@ -63,43 +67,119 @@ func (s *ApiServer) Run() {
 
 // handleProcessReceipts takes a JSON payload of a receipt to determine the points values of the receipt add to the info and return an id for the successfully processed receipt.
 func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request) error {
-	var receipt *ReceiptPayload
-	// TODO: this is a quick way to get various users set would need to update for prod
+	var receipts []*ReceiptPayload
+	var user User
+	// todo: this is a quick way to get various users set would need to update for prod
 	token := r.Header.Get("X-Authorization")
-	if err := json.NewDecoder(r.Body).Decode(&receipt); err != nil {
+	userObj, _ := userStore.LoadOrStore(token, User{ID: token, Receipts: []string{}})
+
+	if userVal, ok := userObj.(User); ok {
+		user = userVal
+	} else {
+		return errLoadOrStoreUser
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&receipts); err != nil {
 		return errInvalidJSON
 	}
 
-	if err := validate.Struct(receipt); err != nil {
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(receipts))
+	resChan := make(chan ProcessedResponse, len(receipts))
 
-		return fmt.Errorf("%w: %v", errReceiptValidation, strings.Split(err.Error(), ":")[2])
+	for _, receipt := range receipts {
+		wg.Add(1)
+		go func(receipt *ReceiptPayload, user User, errCh chan<- error, resCh chan<- ProcessedResponse) {
+			defer wg.Done()
+
+			if err := validate.Struct(receipt); err != nil {
+				errCh <- fmt.Errorf("%w: %v", errReceiptValidation, strings.Split(err.Error(), ":")[2])
+				return
+			}
+
+			isDupe := false
+			receiptStore.Range(func(key, value any) bool {
+				storedReceipt, ok := value.(*ProcessedReceipt)
+				if !ok {
+					return true
+				}
+
+				if storedReceipt.Receipt.Retailer == receipt.Retailer && storedReceipt.Receipt.Total == receipt.Total && storedReceipt.Receipt.PurchaseDate == receipt.PurchaseDate && storedReceipt.Receipt.PurchaseTime == receipt.PurchaseTime {
+					isDupe = true
+					return false
+				}
+
+				return true
+			})
+
+			if isDupe {
+				errCh <- errDuplicateReceipt
+			}
+
+			var processedReceipt *ProcessedReceipt
+			newReceiptId := uuid.New().String()
+
+			processedReceipt = &ProcessedReceipt{
+				ID:             newReceiptId,
+				Receipt:        *receipt,
+				Points:         0,
+				UserID:         user.ID,
+				MerchantID:     receipt.Retailer,
+				SubmissionDate: time.Now(),
+			}
+
+			points, err := processReceiptPoints(&processedReceipt.Receipt, user.ID)
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			processedReceipt.Points = points
+
+			// user.Receipts = append(user.Receipts, newReceiptId)
+
+			// receiptStore.Store(newReceiptId, processedReceipt)
+
+			response := ProcessedResponse{
+				ID:      IdResponse{ID: processedReceipt.ID},
+				Receipt: *processedReceipt,
+			}
+
+			resCh <- response
+		}(receipt, user, errChan, resChan)
 	}
 
-	var processedReceipt *ProcessedReceipt
-	newReceiptId := uuid.New().String()
+	go func() {
+		wg.Wait()
+		close(errChan)
+		close(resChan)
 
-	processedReceipt = &ProcessedReceipt{
-		ID:      newReceiptId,
-		Receipt: *receipt,
-		Points:  0,
-		UserID: token,
-		MerchantID: receipt.Retailer,
-		SubmissionDate: time.Now(),
-	}
+	}()
 
-	points, err := processReceiptPoints(&processedReceipt.Receipt, token)
-	if err != nil {
-		return err
-	}
+	var response []IdResponse
 
-	processedReceipt.Points = points
+	for {
+		select {
+		case res, ok := <-resChan:
+			if !ok {
+				resChan = nil
+			} else {
+				response = append(response, res.ID)
+				user.Receipts = append(user.Receipts, res.ID.ID)
 
-	userStore[token] = append(userStore[token], newReceiptId)
-
-	receiptStore[newReceiptId] = processedReceipt
-
-	response := IdResponse{
-		ID: processedReceipt.ID,
+				receiptStore.Store(res.ID.ID, res)
+			}
+		case err, ok := <-errChan:
+			if ok && err != nil {
+				return err
+			}
+			if !ok {
+				errChan = nil
+			}
+		}
+		if errChan == nil && resChan == nil {
+			break
+		}
 	}
 
 	return WriteJson(w, http.StatusOK, response)
@@ -110,11 +190,13 @@ func (s *ApiServer) handleGetPointsById(w http.ResponseWriter, r *http.Request) 
 	vars := mux.Vars(r)
 	id := vars["id"]
 
-	receipt, ok := receiptStore[id]
+	receiptVal, ok := receiptStore.Load(id)
 
 	if !ok {
 		return fmt.Errorf("%w: %s", errGetReceiptById, id)
 	}
+
+	receipt := receiptVal.(ProcessedReceipt)
 
 	response := PointsResponse{
 		Points: receipt.Points,
@@ -150,8 +232,25 @@ func errorHandleToHandleFunc(fn ApiHandlerFunc) http.HandlerFunc {
 				return
 			}
 
-			if errors.Is(err, errDateTimePointParse) || errors.Is(err, errTotalAsFloat){
+			if errors.Is(err, errDateTimePointParse) || errors.Is(err, errTotalAsFloat) {
 				WriteJson(w, http.StatusBadRequest, ApiError{Error: err.Error()})
+				return
+			}
+
+			if errors.Is(err, errUserNotFound) {
+				WriteJson(w, http.StatusUnauthorized, ApiError{Error: err.Error()})
+				return
+			}
+
+			// ? a different code is probably better late night brain blah -_-
+			if errors.Is(err, errLoadOrStoreUser) {
+				WriteJson(w, http.StatusNotModified, ApiError{Error: err.Error()})
+				return
+			}
+
+			// ? a different code is probably better late night brain blah -_-
+			if errors.Is(err, errDuplicateReceipt) {
+				WriteJson(w, http.StatusConflict, ApiError{Error: err.Error()})
 				return
 			}
 
@@ -227,7 +326,14 @@ func processReceiptPoints(receipt *ReceiptPayload, userID string) (int64, error)
 		pointValue += 10
 	}
 
-	if len(userStore[userID]) < 3 {
+	userVal, ok := userStore.Load(userID)
+
+	if !ok {
+		return 0, errUserNotFound
+	}
+
+	user := userVal.(User)
+	if len(user.Receipts) < 3 {
 		pointValue += 300
 	}
 
