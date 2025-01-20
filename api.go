@@ -85,11 +85,11 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(receipts))
-	resChan := make(chan ProcessedResponse, len(receipts))
+	resChan := make(chan IdResponse, len(receipts))
 
 	for _, receipt := range receipts {
 		wg.Add(1)
-		go func(receipt *ReceiptPayload, user User, errCh chan<- error, resCh chan<- ProcessedResponse) {
+		go func(receipt *ReceiptPayload, user User, errCh chan<- error, resCh chan<- IdResponse) {
 			defer wg.Done()
 
 			if err := validate.Struct(receipt); err != nil {
@@ -138,11 +138,14 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 
 			// user.Receipts = append(user.Receipts, newReceiptId)
 
-			// receiptStore.Store(newReceiptId, processedReceipt)
+			receiptStore.Store(newReceiptId, processedReceipt)
 
-			response := ProcessedResponse{
-				ID:      IdResponse{ID: processedReceipt.ID},
-				Receipt: *processedReceipt,
+			// response := ProcessedResponse{
+			// 	ID:      IdResponse{ID: processedReceipt.ID},
+			// 	Receipt: *processedReceipt,
+			// }
+			response := IdResponse{
+				ID: processedReceipt.ID,
 			}
 
 			resCh <- response
@@ -158,16 +161,16 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 
 	var response []IdResponse
 
+	fmt.Println(receiptStore)
+	fmt.Println(userStore)
 	for {
 		select {
 		case res, ok := <-resChan:
 			if !ok {
 				resChan = nil
 			} else {
-				response = append(response, res.ID)
-				user.Receipts = append(user.Receipts, res.ID.ID)
-
-				receiptStore.Store(res.ID.ID, res)
+				response = append(response, res)
+				// receiptStore.Store(res.ID, processedReceipt)
 			}
 		case err, ok := <-errChan:
 			if ok && err != nil {
