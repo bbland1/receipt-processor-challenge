@@ -86,10 +86,11 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(receipts))
 	resChan := make(chan IdResponse, len(receipts))
+	receiptChan := make(chan ProcessedReceipt, len(receipts))
 
 	for _, receipt := range receipts {
 		wg.Add(1)
-		go func(receipt *ReceiptPayload, user User, errCh chan<- error, resCh chan<- IdResponse) {
+		go func(receipt *ReceiptPayload, user User, errCh chan<- error, resCh chan<- IdResponse, receiptChan chan<- ProcessedReceipt) {
 			defer wg.Done()
 
 			if err := validate.Struct(receipt); err != nil {
@@ -136,26 +137,21 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 
 			processedReceipt.Points = points
 
-			// user.Receipts = append(user.Receipts, newReceiptId)
+			receiptChan <- *processedReceipt
 
-			receiptStore.Store(newReceiptId, processedReceipt)
-
-			// response := ProcessedResponse{
-			// 	ID:      IdResponse{ID: processedReceipt.ID},
-			// 	Receipt: *processedReceipt,
-			// }
 			response := IdResponse{
 				ID: processedReceipt.ID,
 			}
 
 			resCh <- response
-		}(receipt, user, errChan, resChan)
+		}(receipt, user, errChan, resChan, receiptChan)
 	}
 
 	go func() {
 		wg.Wait()
 		close(errChan)
 		close(resChan)
+		close(receiptChan)
 
 	}()
 
@@ -170,7 +166,6 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 				resChan = nil
 			} else {
 				response = append(response, res)
-				// receiptStore.Store(res.ID, processedReceipt)
 			}
 		case err, ok := <-errChan:
 			if ok && err != nil {
@@ -178,6 +173,26 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 			}
 			if !ok {
 				errChan = nil
+			}
+		case receipt, ok := <-receiptChan:
+			if !ok {
+				receiptChan = nil
+			} else {
+				receiptStore.Store(receipt.ID, receipt)
+				storedInfo, ok := userStore.Load(receipt.UserID)
+
+				if ok {
+					userInfo, ok := storedInfo.(User)
+					if !ok {
+						return errLoadOrStoreUser
+					}
+
+					userInfo.Receipts = append(userInfo.Receipts, receipt.ID)
+					userStore.CompareAndSwap(userInfo.ID, userInfo.Receipts, userInfo.Receipts)
+				}
+
+				userStore.Store(receipt.UserID, []string{receipt.ID})
+
 			}
 		}
 		if errChan == nil && resChan == nil {
