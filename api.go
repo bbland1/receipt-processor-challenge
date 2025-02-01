@@ -29,7 +29,7 @@ var (
 	errDateTimePointParse = errors.New("error in parsing purchase datetime")
 	errTotalAsFloat       = errors.New("total couldn't be parse as a float")
 	errUserNotFound       = errors.New("user not found to add points")
-	errLoadOrStoreUser    = errors.New("error loading or storing user first time")
+	errUserInfoLoad       = errors.New("error loading user to save to")
 	errDuplicateReceipt   = errors.New("this receipt has been uploaded before")
 )
 
@@ -68,15 +68,21 @@ func (s *ApiServer) Run() {
 // handleProcessReceipts takes a JSON payload of a receipt to determine the points values of the receipt add to the info and return an id for the successfully processed receipt.
 func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request) error {
 	var receipts []*ReceiptPayload
-	var user User
 	// todo: this is a quick way to get various users set would need to update for prod
 	token := r.Header.Get("X-Authorization")
-	userObj, _ := userStore.LoadOrStore(token, User{ID: token, Receipts: []string{}})
 
-	if userVal, ok := userObj.(User); ok {
-		user = userVal
-	} else {
-		return errLoadOrStoreUser
+	storedUserInfo, _ := userStore.LoadOrStore(token, User{
+		ID:       token,
+		Receipts: []string{},
+	})
+
+	user, ok := storedUserInfo.(User)
+
+	fmt.Println(storedUserInfo)
+	fmt.Println(user)
+
+	if !ok {
+		return errUserNotFound
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&receipts); err != nil {
@@ -115,12 +121,12 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 
 			if isDupe {
 				errCh <- errDuplicateReceipt
+				return
 			}
 
-			var processedReceipt *ProcessedReceipt
 			newReceiptId := uuid.New().String()
 
-			processedReceipt = &ProcessedReceipt{
+			processedReceipt := &ProcessedReceipt{
 				ID:             newReceiptId,
 				Receipt:        *receipt,
 				Points:         0,
@@ -129,7 +135,7 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 				SubmissionDate: time.Now(),
 			}
 
-			points, err := processReceiptPoints(&processedReceipt.Receipt, user.ID)
+			points, err := processReceiptPoints(&processedReceipt.Receipt, user)
 			if err != nil {
 				errCh <- err
 				return
@@ -157,8 +163,6 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 
 	var response []IdResponse
 
-	fmt.Println(receiptStore)
-	fmt.Println(userStore)
 	for {
 		select {
 		case res, ok := <-resChan:
@@ -179,19 +183,9 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 				receiptChan = nil
 			} else {
 				receiptStore.Store(receipt.ID, receipt)
-				storedInfo, ok := userStore.Load(receipt.UserID)
 
-				if ok {
-					userInfo, ok := storedInfo.(User)
-					if !ok {
-						return errLoadOrStoreUser
-					}
-
-					userInfo.Receipts = append(userInfo.Receipts, receipt.ID)
-					userStore.CompareAndSwap(userInfo.ID, userInfo.Receipts, userInfo.Receipts)
-				}
-
-				userStore.Store(receipt.UserID, []string{receipt.ID})
+				user.Receipts = append(user.Receipts, receipt.ID)
+				userStore.Store(token, user)
 
 			}
 		}
@@ -199,6 +193,30 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 			break
 		}
 	}
+
+	// Debugging: Inspect the userStore
+	fmt.Println("Checking userStore contents:")
+	userStore.Range(func(key, value interface{}) bool {
+		fmt.Println("Key:", key)
+		fmt.Println("Value:", value)
+		return true
+	})
+
+	// Also check the specific user stored
+	userInfo, ok := userStore.Load(token)
+	if ok {
+		fmt.Println("Stored user info for token:", userInfo)
+	} else {
+		fmt.Println("User not found in userStore for token:", token)
+	}
+
+	// Debugging: Inspect the receiptStore
+	fmt.Println("Checking receiptStore contents:")
+	receiptStore.Range(func(key, value interface{}) bool {
+		fmt.Println("Key:", key)
+		fmt.Println("Value:", value)
+		return true
+	})
 
 	return WriteJson(w, http.StatusOK, response)
 }
@@ -261,7 +279,7 @@ func errorHandleToHandleFunc(fn ApiHandlerFunc) http.HandlerFunc {
 			}
 
 			// ? a different code is probably better late night brain blah -_-
-			if errors.Is(err, errLoadOrStoreUser) {
+			if errors.Is(err, errUserInfoLoad) {
 				WriteJson(w, http.StatusNotModified, ApiError{Error: err.Error()})
 				return
 			}
@@ -279,7 +297,7 @@ func errorHandleToHandleFunc(fn ApiHandlerFunc) http.HandlerFunc {
 }
 
 // processReceiptPoints takes a receipt and processes it to return the point value based on the establish value logic.
-func processReceiptPoints(receipt *ReceiptPayload, userID string) (int64, error) {
+func processReceiptPoints(receipt *ReceiptPayload, user User) (int64, error) {
 	/*
 		current point logic:
 		- 1 point for every alphanumeric character in the retailer name.
@@ -344,13 +362,12 @@ func processReceiptPoints(receipt *ReceiptPayload, userID string) (int64, error)
 		pointValue += 10
 	}
 
-	userVal, ok := userStore.Load(userID)
+	// storedReceipts, ok := userStore.Load(userID)
 
-	if !ok {
-		return 0, errUserNotFound
-	}
+	// if !ok {
+	// 	return 0, errUserNotFound
+	// }
 
-	user := userVal.(User)
 	if len(user.Receipts) < 3 {
 		pointValue += 300
 	}
