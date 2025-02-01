@@ -196,7 +196,7 @@ func (s *ApiServer) handleGetPointsById(w http.ResponseWriter, r *http.Request) 
 		return fmt.Errorf("%w: %s", errGetReceiptById, id)
 	}
 
-	receipt := receiptVal.(ProcessedReceipt)
+	receipt := receiptVal.(*ProcessedReceipt)
 
 	response := PointsResponse{
 		Points: receipt.Points,
