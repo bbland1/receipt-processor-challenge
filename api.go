@@ -78,9 +78,6 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 
 	user, ok := storedUserInfo.(User)
 
-	fmt.Println(storedUserInfo)
-	fmt.Println(user)
-
 	if !ok {
 		return errUserNotFound
 	}
@@ -92,11 +89,10 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(receipts))
 	resChan := make(chan IdResponse, len(receipts))
-	receiptChan := make(chan ProcessedReceipt, len(receipts))
 
 	for _, receipt := range receipts {
 		wg.Add(1)
-		go func(receipt *ReceiptPayload, user User, errCh chan<- error, resCh chan<- IdResponse, receiptChan chan<- ProcessedReceipt) {
+		go func(receipt *ReceiptPayload, user User, errCh chan<- error, resCh chan<- IdResponse) {
 			defer wg.Done()
 
 			if err := validate.Struct(receipt); err != nil {
@@ -143,21 +139,23 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 
 			processedReceipt.Points = points
 
-			receiptChan <- *processedReceipt
+			receiptStore.Store(newReceiptId, processedReceipt)
+
+			user.Receipts = append(user.Receipts, newReceiptId)
+			userStore.Store(token, user)
 
 			response := IdResponse{
 				ID: processedReceipt.ID,
 			}
 
 			resCh <- response
-		}(receipt, user, errChan, resChan, receiptChan)
+		}(receipt, user, errChan, resChan)
 	}
 
 	go func() {
 		wg.Wait()
 		close(errChan)
 		close(resChan)
-		close(receiptChan)
 
 	}()
 
@@ -178,45 +176,11 @@ func (s *ApiServer) handleProcessReceipts(w http.ResponseWriter, r *http.Request
 			if !ok {
 				errChan = nil
 			}
-		case receipt, ok := <-receiptChan:
-			if !ok {
-				receiptChan = nil
-			} else {
-				receiptStore.Store(receipt.ID, receipt)
-
-				user.Receipts = append(user.Receipts, receipt.ID)
-				userStore.Store(token, user)
-
-			}
 		}
 		if errChan == nil && resChan == nil {
 			break
 		}
 	}
-
-	// Debugging: Inspect the userStore
-	fmt.Println("Checking userStore contents:")
-	userStore.Range(func(key, value interface{}) bool {
-		fmt.Println("Key:", key)
-		fmt.Println("Value:", value)
-		return true
-	})
-
-	// Also check the specific user stored
-	userInfo, ok := userStore.Load(token)
-	if ok {
-		fmt.Println("Stored user info for token:", userInfo)
-	} else {
-		fmt.Println("User not found in userStore for token:", token)
-	}
-
-	// Debugging: Inspect the receiptStore
-	fmt.Println("Checking receiptStore contents:")
-	receiptStore.Range(func(key, value interface{}) bool {
-		fmt.Println("Key:", key)
-		fmt.Println("Value:", value)
-		return true
-	})
 
 	return WriteJson(w, http.StatusOK, response)
 }
